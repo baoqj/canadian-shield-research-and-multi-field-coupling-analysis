@@ -19,7 +19,7 @@ $$
 
 深部岩体中的孔隙率和渗透率演化是理解地质流体运移和工程稳定性的关键因素。早期研究主要关注实验室尺度的短期水-岩反应，或采用简化模型进行长期演化预测。这些研究虽然揭示了基本反应机理，但难以捕捉实际地质环境中的空间异质性和非线性演化过程。近年来，随着计算能力的提升和数值方法的发展，多场耦合模拟逐渐成为研究复杂地质过程的重要手段。然而，传统网格离散方法在处理大尺度、长时间的非线性耦合问题时仍面临计算效率和数值稳定性等挑战。
 
-物理信息神经网络（Physics-Informed Neural Networks, PINN）作为一种新兴的科学计算范式，将深度学习与物理守恒定律相结合，为复杂多场耦合问题提供了新的解决方案。PINN方法将物理方程作为神经网络训练的约束条件，不仅能处理高维非线性问题，还能有效融合观测数据与理论模型，特别适合地质演化等存在多尺度、强非线性特征的问题。尽管如此，PINN方法在地质工程领域的应用仍处于起步阶段，特别是在考虑深部花岗岩体反应-运移-力学耦合方面的研究相对匮乏。
+物理信息神经网络（Physics-Informed Neural Networks, PINN）是一种融合物理定律与神经网络的混合建模方法，作为一种新兴的科学计算范式，将深度学习与物理守恒定律相结合，为复杂多场耦合问题提供了新的解决方案。PINN方法将物理方程作为神经网络训练的约束条件，不仅能处理高维非线性问题，还能有效融合观测数据与理论模型，特别适合地质演化等存在多尺度、强非线性特征的问题。尽管如此，PINN方法在地质工程领域的应用仍处于起步阶段，特别是在考虑深部花岗岩体反应-运移-力学耦合方面的研究相对匮乏。
 
 近年来的野外监测和实验室研究表明，即使在被认为高度稳定的花岗岩体中，孔隙率和渗透率也存在时空变化。这些变化对工程安全和环境保护具有重要影响，尤其在核废料处置、CO₂地质封存和地热能开发等领域。然而，由于深部环境监测的困难性和地质过程的长期性，仅依靠观测难以全面理解岩体演化机制。因此，发展适用于长时间尺度的多场耦合数值模拟方法，对于预测深部工程安全性和优化场址选择具有迫切需求。
 
@@ -148,7 +148,272 @@ $$
 
 #### 模拟过程
 1. 化学侵蚀效应分析
-    基于物理信息神经网络(PINN)的化学侵蚀效应模拟代码。该模型模拟酸性溶液沿裂隙渗透导致的矿物溶解、二次矿物沉淀和孔隙率演化过程。
+    基于物理信息神经网络(PINN)的化学侵蚀效应进行模拟，在化学侵蚀过程中，采用PINN神经网络来表示孔隙率、pH 值、矿物浓度等物理场变量，利用自动微分计算偏微分方程（PDE）的残差，并将物理规律作为损失函数的一部分进行训练。该模型模拟酸性溶液沿裂隙渗透导致的矿物溶解、二次矿物沉淀和孔隙率演化过程。
+
+    - PINN架构的几个关键构成：
+    ```
+    class ChemicalErosionPINN(nn.Module):
+        def __init__(self, hidden_layers, neurons_per_layer):
+            # 网络结构定义：输入层(x,y,z,t)，多个隐藏层，输出层(φ,k,pH,C各组分)
+            
+        def forward(self, x):
+            # 前向传播并确保输出物理合理性
+            phi = 0.01 + 0.29 * torch.sigmoid(outputs[:, 0:1])  # 孔隙率范围[0.01, 0.3]
+            k = torch.exp(outputs[:, 1:2] - 35)  # 渗透率范围[~1e-18, ~1e-14]
+            pH = 2.0 + 10.0 * torch.sigmoid(outputs[:, 2:3])  # pH范围[2, 12]
+            C_quartz = torch.relu(outputs[:, 3:4])  # 浓度为非负值
+    ```
+
+    - 关键化学方程与计算公式
+        1. 矿物溶解速率方程
+            酸性条件下的矿物溶解速率：
+            
+            $R_i = k_i \cdot a^{n_i}_{H^+} \cdot \exp(-\frac{E_{a,i}}{RT}) \cdot (1 - \frac{IAP}{K_{eq}})$
+
+            其中：
+            - $R_i$ 是矿物$i$的溶解速率 [mol/(m²·s)]
+            - $k_i$ 是速率常数 [mol/(m²·s)]
+            - $a_{H^+}$ 是氢离子活度 ($10^{-pH}$)
+            - $n_i$ 是反应级数（长石为0.8，石英为0.5）
+            - $E_{a,i}$ 是活化能 [kJ/mol]
+            - $R$ 是气体常数 [8.314 J/(mol·K)]
+            - $T$ 是温度 [K]
+            - $IAP/K_{eq}$ 是离子活度积与平衡常数的比值
+
+            代码实现
+            ```
+            # 计算氢离子活度
+            a_H = 10**(-pH)
+
+            # 计算石英溶解速率
+            rate_quartz = rate_factor * self.params.dissolution_rates['quartz'] * (
+                a_H**0.5 * torch.exp(-torch.tensor(self.params.activation_energy['quartz'], 
+                dtype=torch.float32, device=a_H.device) * 1000 / (self.params.R * self.params.T))
+            )
+
+            # 计算长石溶解速率 - 受pH影响更大
+            rate_feldspar = rate_factor * self.params.dissolution_rates['feldspar'] * (
+                a_H**0.8 * torch.exp(-torch.tensor(self.params.activation_energy['feldspar'], 
+                dtype=torch.float32, device=a_H.device) * 1000 / (self.params.R * self.params.T))
+            )
+            ```
+
+        2. 对流-扩散-反应方程
+
+            溶质传输方程：
+
+            $\frac{\partial C_i}{\partial t} + \vec{v} \cdot \nabla C_i = D_i \nabla ^2 C_i + R_i $
+
+
+            其中：
+            - $C_i$ 是组分$i$的浓度 [mol/m³]
+            - $\vec{v}$ 是达西流速 [m/s]
+            - $D_i$ 是扩散系数 [m²/s]
+            - $R_i$ 是反应源项 [mol/(m³·s)]
+
+            代码实现
+            ```
+            # 石英浓度方程
+            eq_quartz = (
+                grads['dC_quartz_dt'] + 
+                v_x * grads['dC_quartz_dx'] + 
+                v_y * grads['dC_quartz_dy'] + 
+                v_z * grads['dC_quartz_dz'] - 
+                self.params.D_solute * (
+                    grads['d2C_quartz_dx2'] + 
+                    grads['d2C_quartz_dy2'] + 
+                    grads['d2C_quartz_dz2']
+                ) - 
+                rate_quartz
+            )
+            ```
+
+        3. 孔隙率演化方程
+
+            矿物溶解/沉淀导致的孔隙率变化：
+
+            $\frac{\partial \phi}{\partial t} = \Sigma_i V_{m,i} \cdot R_i$
+
+            其中：
+            - $\phi$ 是孔隙率 [无量纲]
+            - $V_{m,i}$ 是矿物$i$的摩尔体积 [m³/mol]
+            - $R_i$ 是矿物$i$的反应速率 [mol/(m³·s)]（正值表示溶解，负值表示沉淀）
+
+            代码实现
+            ```
+            # 体积变化 = 溶解矿物体积 - 沉淀矿物体积
+            vol_change_quartz = rate_quartz * self.params.molar_volumes['quartz'] / 1e6  # 转换为m³/s
+            vol_change_feldspar = rate_feldspar * self.params.molar_volumes['feldspar'] / 1e6
+            vol_change_clay = -rate_clay * self.params.molar_volumes['clay'] / 1e6
+            vol_change_sulfate = -rate_sulfate * self.params.molar_volumes['sulfate'] / 1e6
+
+            total_vol_change = vol_change_quartz + vol_change_feldspar + vol_change_clay + vol_change_sulfate
+
+            eq_porosity = grads['dphi_dt'] - total_vol_change
+            ```
+
+        4. 孔隙度-渗透率关系方程
+
+            修正的Kozeny-Carman方程：
+
+            $k = k_0 (\frac{\phi}{\phi_0})^m$
+
+            其中：
+
+            - $k$ 是渗透率 [m²]
+            - $k_0$ 是初始渗透率 [m²]
+            - $\phi$ 是孔隙率 [无量纲]
+            - $\phi_0$ 是初始孔隙率 [无量纲]
+            - $m$ 是经验系数（代码中取3.0）
+
+            代码实现
+            ```
+            # k = k0 * (φ/φ0)^m
+            eq_permeability = grads['k'] - k0 * (grads['phi'] / phi0) ** self.params.m
+            ```
+
+        5. 达西定律与流体流速计算
+
+            达西定律：
+
+            $\vec{v} = -\frac{k}{\mu} \cdot  \nabla p$
+
+            其中：
+
+            - $\vec{v}$ 是达西流速 [m/s]
+            - $k$ 是渗透率 [m²]
+            - $\mu$ 是流体动力粘度 [Pa·s]
+            - $\nabla p$ 是压力梯度 [Pa/m]
+        
+            代码实现
+            ```
+            # 计算达西流速
+            v_x = -k / mu * p_grad_x
+            v_y = -k / mu * p_grad_y
+            v_z = -k / mu * p_grad_z
+
+            # 考虑裂隙影响
+            fracture_influence = compute_fracture_influence(x, y, z, self.fracture_network, self.params)
+            v_x = v_x * (1 + 100 * fracture_influence)
+            v_y = v_y * (1 + 100 * fracture_influence)
+            v_z = v_z * (1 + 100 * fracture_influence)
+            ```
+
+
+        6. pH值传输与演化方程
+
+            pH值变化方程：
+
+            $\frac{\partial pH}{\partial t} + \vec{v} \cdot \nabla pH = D_H  \nabla^2 pH - \gamma \cdot (R_{feldspar} - R_{clay} - R_{sulfate})$
+
+            其中：
+
+            - $pH$ 是pH值 [无量纲]
+            - $\vec{v}$ 是达西流速 [m/s]
+            - $D_H$ 是氢离子扩散系数 [m²/s]
+            - $\gamma$ 是比例系数，反映化学反应对pH的影响
+            - 长石溶解消耗H+，沉淀反应释放H+
+
+
+            代码实现
+            ```
+            # pH值方程 - 考虑氢离子传输和消耗
+            eq_pH = (
+                grads['dpH_dt'] + 
+                v_x * grads['dpH_dx'] + 
+                v_y * grads['dpH_dy'] + 
+                v_z * grads['dpH_dz'] - 
+                self.params.D_H * (
+                    grads['d2pH_dx2'] + 
+                    grads['d2pH_dy2'] + 
+                    grads['d2pH_dz2']
+                ) + 
+                0.1 * (rate_feldspar - rate_clay - rate_sulfate)  # 假设长石溶解消耗H+，沉淀释放H+
+            )
+            ```
+
+        7. 二次矿物沉淀速率方程
+
+            pH阈值控制的沉淀速率：
+
+            $R_{precip,j} = k_j \cdot \max(0, pH - pH_{threshold}) \cdot (1 - e^{-C_i/C_{ref}})$
+
+            其中：
+            
+            - $R_{precip,j}$ 是矿物$j$的沉淀速率 [mol/(m³·s)]
+            - $k_j$ 是沉淀速率常数 [mol/(m³·s)]
+            - $pH_{threshold}$ 是沉淀pH阈值
+            - $C_i$ 是前驱物溶解浓度 [mol/m³]
+            - $C_{ref}$ 是参考浓度 [mol/m³]
+            
+            代码实现
+            ```
+            # 粘土矿物沉淀 - 在pH > 5时沉淀
+            rate_clay = self.params.precipitation_rate_clay * torch.relu(pH - self.params.precipitation_pH_threshold) * (
+                1.0 - torch.exp(-(grads['C_feldspar'] / 10.0))  # 与长石溶解产物浓度相关
+            )
+
+            # 硫酸盐沉淀 - 在pH > 6时沉淀
+            rate_sulfate = self.params.precipitation_rate_sulfate * torch.relu(pH - (self.params.precipitation_pH_threshold + 1.0)) * (
+                1.0 - torch.exp(-(grads['C_quartz'] / 5.0))  # 与石英溶解产物浓度相关
+            )
+            ```
+
+        8. 裂隙影响因子计算
+
+            裂隙对流体流动和化学反应的影响通过影响因子函数计算：
+
+            $F_{frac}(x, y, z) = \exp(- \frac{d_{min}}{\alpha \cdot b}) + \Sigma_{i} I_{i} \cdot \exp(- \frac{d_i}{\beta})$
+
+            其中：
+
+            - $F_{frac}$ 是裂隙影响因子 [0-1]
+            - $d_{min}$ 是到最近裂隙的距离 [m]
+            - $b$ 是裂隙开度 [m]
+            - $\alpha, \beta$ 是衰减系数
+            - $I_i$ 是裂隙交汇点的额外影响
+            - $d_i$ 是到交汇点$i$的距离 [m]
+
+            代码实现
+            ```
+            # 计算到最近裂隙的距离
+            distances = compute_distance_to_fractures(x, y, z, fracture_network, params)
+
+            # 指数衰减影响函数
+            influence = torch.exp(-distances / (5 * params.fracture_aperture))
+
+            # 裂隙交汇处影响更强
+            intersection_points = [[250, 250, 15], [150, 300, 25], [350, 200, 20]]
+            for point in intersection_points:
+                x0, y0, z0 = point
+                dist_to_intersection = torch.sqrt((x - x0)**2 + (y - y0)**2 + (z - z0)**2)
+                intersection_influence = 0.5 * torch.exp(-dist_to_intersection / 30.0)
+                influence = torch.max(influence, intersection_influence)
+            ```
+
+        9. 反应速率的裂隙增强效应
+
+            裂隙影响通过增强反应速率系数实现：
+
+            $R_{i}^{eff} = R_i \cdot (1 + \lambda \cdot F_{frac})$
+
+            其中：
+
+            - $R_i^{eff}$ 是考虑裂隙影响的有效反应速率
+            - $R_i$ 是基本反应速率
+            - $\lambda$ 是增强系数（代码中取10.0）
+            - $F_{frac}$ 是裂隙影响因子
+
+            代码实现
+            ```
+            # 考虑裂隙影响使溶解速率增加
+            rate_factor = 1.0 + 10.0 * fracture_influence
+
+            # 应用于各矿物溶解速率
+            rate_quartz = rate_factor * self.params.dissolution_rates['quartz'] * ...
+            rate_feldspar = rate_factor * self.params.dissolution_rates['feldspar'] * ...
+            ```
+
     - 化学侵蚀效应时空演化分析
         基于提供的五个时间点（0年、25年、50年、75年和100年）的化学侵蚀可视化结果，我可以对整个侵蚀过程的时空演化特征进行详细分析。
         ![Fig8](./assets/img/01-chemical_erosion/chemical_erosion_results_t0.png "化学侵蚀0年")
@@ -385,6 +650,57 @@ $$
 2. 孔隙率演化模拟分析
 
     基于物理信息神经网络(PINN)方法对大型地质区块的孔隙率演化进行模拟的完整分析和代码实现。
+
+    - 关键化学方程与计算公式
+        1. 达西定律（Darcy's Law）
+
+            地下水流动公式，描述了流体在多孔介质中的流动关系：：
+            
+            $q = - \frac{k}{\mu}$
+
+            或以水力梯度形式表示：
+    
+            $q = - K \nabla h$
+
+
+            其中：
+
+            - $q$ 是达西流速（流量除以总截面积）[m/s]
+            - $k$ 是绝对渗透率 [m²]
+            - $K$ 是水力传导系数 [m/s]
+            - $\mu$ 是流体动力粘度 [Pa·s]
+            - $\nabla p$ 是压力梯度 [Pa/m]
+            - $\nabla h$ 是水力梯度 [m/m]
+
+            水力传导系数与绝对渗透率的关系：
+
+            $K = \frac{k\rho g}{\mu}$
+
+            - 其中 $\rho$ 是流体密度 [kg/m³]，$g$ 是重力加速度 [m/s²]。
+
+        2. 三维渗流连续性方程
+        
+            考虑变饱和度条件下的质量守恒：
+
+            $\frac{\partial(\phi \rho)}{\partial t} + \nabla \cdot (\rho q) = \rho Q$
+
+            其中：
+
+            - $\phi$ 是孔隙率 [无量纲]
+            - $\rho$ 是流体密度 [kg/m³]
+            - $Q$ 是源/汇项 [1/s]
+
+        3. 孔隙度-渗透率关系
+
+            Kozeny-Carman 方程
+        
+            描述孔隙率变化与渗透率变化的经典关系：
+
+            其中：
+
+            - $k_0$ 是初始渗透率 [m²]
+            - $\phi_0$ 是初始孔隙率 [无量纲]
+            - $\phi$ 是当前孔隙率 [无量纲]
 
     - 模型概述
 
@@ -809,6 +1125,8 @@ $$
 4. 岩体中化学-力学耦合作用综合分析
 
     基于提供的地质、化学、力学和地热特性数据，我将对这个典型的花岗岩主导的椭圆形盆地结构进行多维度综合分析。这一分析将涵盖化学侵蚀与力学稳定性的耦合关系，以及其对地下工程和环境保护的影响。
+
+
 
 ### 3. 结果与发现
 

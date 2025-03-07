@@ -9,6 +9,11 @@ import os
 import time
 from torch.utils.tensorboard import SummaryWriter
 
+
+# 设置字体
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # 或者 'Heiti SC'
+plt.rcParams['axes.unicode_minus'] = False 
+
 # 设置随机种子以确保结果可重复
 torch.manual_seed(42)
 np.random.seed(42)
